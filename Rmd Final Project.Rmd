@@ -1,0 +1,520 @@
+---
+title: "BIO722 Final Project"
+author: "Enzo Baracuhy"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+date: "`r format(Sys.time(),'%d %b %Y')`"
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Project introduction
+
+  My lab works on developing and exploring the mechanisms behind oncolytic viruses (OVs). Since their discovery, these viruses have been understood to work by selectively replicating within cancer cells, and not healthy cells, leading to the generation of new virus particles that can go on to infect other cancer cells. Over the past few decades, however, our field has also begun to appreciate how an OV’s ability to stimulate the immune system against cancer also plays into its therapeutic efficacy. 
+
+Our lab and others have shown that inactivated (i.e. non-replicating) viruses can still stimulate cellular and systemic immune responses against tumours. My MSc project’s main question is whether the OV our lab works with, Bovine herpesvirus-1 (BHV-1), can still maintain its therapeutic efficacy following ultraviolet (UV) inactivation. So far, I have shown that live BHV-1 and UV BHV-1 have no significant difference in extending the survival of tumour-bearing mice. In addition to this experiment, I have also performed a microarray using Thermofisher’s Clariom S Mouse Assay (Cat. # 902930) to better understand how our models are responding to BHV-1 infection and treatment.
+
+The microarray aimed to answer the question, “What is the global transcriptomic difference between cancer cells infected with live vs UV BHV-1?” Preliminary experiments had shown significant differences in gene expression between cells infected with either group of virus. Thus, from a purely virology and biological perspective, I was interested in exploring what other genes may be differentially regulated to help understand how the cells respond differently to each virus. Further, our lab has historically not had a reliable method of validating the efficacy of a therapeutic regiment *in vivo* by analysing its properties *in vitro*. The data from this experiment could be compared with another analysis done on RNA extracted from tumours to find common genes between *in vivo* and *in vitro* models of our system. These comparisons may allow future experiments to possibly evaluate whether there are any trends or perhaps predictive genes that indicate how a therapy is going to perform. 
+
+Our lab has used the Clariom S Array microarray with different models and viruses in the past, and we have historically analyzed our data using Thermofisher’s Transcriptome Analysis Console (TAC) Software.^3^ This software was designed to import .CEL files and perform the necessary quality control and data normalization on our files. From there, the software allows us to select the groups we wish to compare and provides the fold change in gene expression between groups, among other values.
+
+However, this software is largely a black box for me and my lab since we do very little bioinformatics. This project analyzes my .CEL files using R and Bioconductor using documentation available online.^1^ I discuss the quality measures microarray photos, histograms, boxplots, MA plots, and PCA plots. Given how my personal lack of experience is with the math/statistics, coding, and analysis that goes on behind the scene in analyzing large datasets, this report will have a large focus on why these measures are important for quality analyses, and how that applies to my data so that I can learn more about them.
+
+To compare the software my lab has historically used for microarray analysis (TAC) with other methods, I discuss the normalization methods. There are 2 types of normalization that I will be discussing: RMA and SST-RMA. From my reading into the TAC software and R packages for analyzing microarray data, I found a major difference to be that TAC uses SST-RMA normalization while the R packages I am using uses RMA normalization. I performed RMA normalization with R on my dataset and compared the differentially expressed genes between R from these two methods with the outputs I got from TAC, and discuss these differences. I also discuss of the steps involved in these normalization methods and how they differ. Finally, I compare the fold change values between a couple of key groups to see what effect normalization had on the values.
+
+## Installing Packages
+
+Below are the packages I will be using. The most important package for importing my data files and performing quality and normalization is the ```oligo``` package. ```oligo``` is very similar to the ```affy``` package, which has historically been used for older arrays like 3' arrays in conjunction with ```affyPLM``` and ```simplyaffy```. ```oligo``` is built to be used with newer arrays like Human Transcriptome Array and Gene ST.^1^ My array, the Clariom S Assay, is newer than both of those, and is different in that it consists of a constitutive exon probe set. Given how ```oligo``` and ```affy``` have similar methods, it is important to not load them both as R can produce errors.
+
+```{r packages, eval=FALSE}
+install.packages("Matrix")
+install.packages("lattice")
+install.packages("fdrtool")
+install.packages("rpart")
+install.packages("ggplot2")
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install("oligo", force = T)
+BiocManager::install("limma")
+BiocManager::install("Biobase")
+BiocManager::install("Biostrings")
+BiocManager::install("genefilter")
+
+```
+
+## Loading the packages
+
+```{r, warning=F, message=F}
+library(Matrix)
+library(lattice)
+library(fdrtool)
+library(rpart)
+library(ggplot2)
+library(oligo)
+library(limma)
+library(Biobase)
+library(Biostrings)
+library(genefilter)
+```
+
+## Setting file paths and creating an ExpressionFeatureSet Object
+
+```oligo``` creates ExpressionFeatureSet objects that store my .CEL files I must first specify the location of my files
+
+```{r}
+celpath = "/Users/Enzo/Desktop/BIO\ 722/CEL_vitro"
+
+list = list.files(celpath,full.names=TRUE)
+data = read.celfiles(list)
+data
+```
+
+From here, we can see that the files are simply indexed 1-36
+
+```{r}
+ph = data@phenoData
+ph@data
+```
+
+To help with indicating which files are associated with which index in subsequent code, I will made the index the same as the file name
+```{r}
+new_index <- rownames(ph@data)
+ph@data[ ,1] <- new_index
+ph@data
+```
+
+
+**Description of what the file names represents:**
+
+This experiment used mouse melanoma cells (C10 cells) and infected them with either live, UV-inactivated BHV-1, or nothing (mock-infected control). The same groups were also treated with or without Mitomycin C, which is a chemotherapy agent that we use in synergy with BHV-1 *in vivo*. I did not analyze groups treated with Mitomycin C because it was data for a separate experiment, but I am including the files in this project because they can serve as more examples of good or poor quality control. After treatment and infection, RNA from cells was harvested at 6hr and 12hr post-infection. 3 biological replicates were done where this same experiment was repeated on 3 separate days. In total, there were 12 tested groups and 36 samples total.
+
+The first number of the file corresponds to which biological replicate it is (1st, 2nd, or 3rd). The first letter is whether sample was mock (M), live (L), or (U)-infected. The second letter is whether or not the cells were also treated with Mitomycin C (M) or no Mitomycin (O). The last number is whether the RNA was harvested at 6 or 12 hours.
+
+Examples:
+1MO_12 would be the first biological replicate of mock-infected cells without mitomycin harvested at 12 hours.
+2LM_6 would be the second biological replicate of live-infected cells with mitomycin harvested at 6 hours.
+
+To create cleaner labels for graphs, I will create a vector that removes the ".CEL" portion of each of the samples.
+
+```{r}
+file_names <- gsub("\\.CEL$", "", basename(list))
+```
+
+
+# Quality Control
+
+
+## Microarray Photos
+
+Microarray photos are actual images of the microarray chip following the experiment--a visual of the raw data. Each position on the microarray corresponds to a distinct gene, with the intensity of color in each spot reflecting the gene's expression level in the sample. These images serve as an initial quality assessment tool, detecting any apparent anomalies in the experiment such as irregular hybridization or debris like dust particles.^1,4^ For example, the different red and blue colours should be evenly distributed across the array. If there is a space unevenly saturated with either colour, that can indicate a quality error.^6^
+
+The code below generates microarray photos of each of my samples:
+
+```{r, eval=FALSE}
+output_dir = "/Users/Enzo/Desktop/BIO\ 722/QC\ files/microarray_photos/"
+
+for (i in 1:36) {
+  name = paste(output_dir, "microarray_photo_",file_names[i],".jpg",sep="")
+  jpeg(name)
+  image(data[,i],main=ph@data$sample[i])
+  dev.off()
+}
+```
+
+Upon inspection of all microarray photos, they all appeared to have similar intensities. One exception is 2LM_12, which appears to be overall darker blue than other photos. Below is 2LM_12 along with 3 other photos that are more average. 
+
+```{r}
+image(data[,13])
+image(data[,12])
+image(data[,14])
+image(data[,16])
+```
+
+The brightness or darkness of a microarray image is often correlated to signal intensity, where a brighter array (bright-light purple colour) results from more hybridization of the cDNA to the probes, thus providing a brighter image. On the other hand, a darker array (as seen on 2LM_12) is suggestive of lower signal intensities, thus less hybridization. These differences intensities between arrays can have different causes. For example, overall higher or lower overall gene expression in the sample, poor quality of the RNA, accidentally loading less or more RNA than what is optimal, or or protocol variation between samples. None of the photos showed signs of physical debris.This information was gathered from a conversation with Thermofisher's Microarray Support team.
+
+
+## Histograms and Boxplots of raw intensity data for each array
+
+Both histograms and boxplots asses the probe intensity between different arrays. Histograms plot the density of probes over their corresponding log2 intensities, which yields a distribution that should be consistent across all arrays. If not, normalization is required.^1^ Similarly, Boxplots show the distribution of the log intensities of all probes within a sample. 
+
+Here I generated histograms for each of my arrays:
+
+```{r, eval=FALSE}
+output_dir = "/Users/Enzo/Desktop/BIO\ 722/QC\ files/histograms/"
+
+for (i in 1:36) {
+  name = paste(output_dir, "histogram_",file_names[i],".jpg",sep="")
+  jpeg(name)
+  hist(data[,i],lwd=2,which='pm',ylab='Density',xlab='Log2 intensities',main=ph@data$sample[i])
+  dev.off()
+}
+```
+
+Most histograms had a right-skew distribution with most of them having similar distributions to each other. Overall, the samples harvested at 6 hours tended to have slightly wider distributions of log2 intensities compared to those harvested at 12 hours. Below are some examples of the distributions of samples harvested at 6 hours vs 12 hours. The differences between samples harvested at 6 hours vs 12 hours is discussed in the PCA section later.
+
+```{r}
+hist(data[,2], main=file_names[2])
+hist(data[,4], main=file_names[4])
+hist(data[,3], main=file_names[3])
+hist(data[,5], main=file_names[5])
+
+```
+
+
+Here I am generating boxplots for the raw intensity values
+
+```{r}
+pmexp = pm(data)
+
+sampleNames = vector()
+logs = vector()
+for (i in 1:36) {
+sampleNames = c(sampleNames,rep(ph@data[i,1],dim(pmexp)[1]))
+logs = c(logs,log2(pmexp[,i]))
+}
+#removing the ".CEL" from the end of the file names
+sampleNames <- sub("\\.CEL$", "", sampleNames)
+
+logData = data.frame(logInt=logs,sampleName=sampleNames)
+dataBox = ggplot(logData,aes(sampleName,logInt))
+dataBox + geom_boxplot() + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+```
+
+As expected, similar to the histograms, much of the variation in mean log intensities appears to come from the different time points (6 vs 12 hours). Samples harvested at 12 hours have observably lower log intensities compared to those harvested at 6 hours. 
+
+## MA plots
+
+MA plots visually represent the relationship between gene expression variability and expression levels across replicates. The X axis is "A", which is the average between the intensity of a given probe on a particular array, and the median intensity of the same probe across all arrays. In other words, if A is high, it indicates that the probe intensity is high in general. The Y axis is M, which is the log2 difference between the intensity of a probe on the array and the median intensity of the same probe across other arrays. In other words, if M is high, this typically suggests a substantial change in expression level for the gene represented by that probe between the experimental condition and the reference (median) condition. If M is negative, that could suggest the gene is down regulated.^1, 16^ Regardless of the value of M, a statistical test needs to be done to determine whether a gene is indeed significantly differentially regulated.
+
+The code below generates MA plots for each of my samples. In the next section I will compare raw and normalized MA plots.
+```{r, eval=FALSE}
+output_dir = "/Users/Enzo/Desktop/BIO\ 722/QC\ files/MA_plots_raw/"
+
+for (i in 1:36) {
+name = paste(output_dir, "MAplot_",file_names[i],".jpg",sep="")
+jpeg(name)
+MAplot(data,which=i)
+dev.off()
+}
+```
+
+
+
+
+# Normalization of data
+
+Normalization of data is important to account for factors that may have systematically influenced the outcomes of the raw data and lead to its variation. These factors can include RNA quality, differences in the amount of labeled cDNA that was hibridized to the array, or even human error when preparing the chip. Many methods exist to normalize data, though RMA (Robust multiarray Average) is the most common type for microarrays. RMA involves three main steps: background correction, quantile normalization, and summarization.^8^ 
+
+Background correction aims to remove noise, which is ubiquitous in microarray data. Affymetrix expression arrays, such as the Clariom S that was used here, have "probe pairs", where each pair is composed of a perfect match (PM) probe that has a perfect complementary sequence to a cDNA, and a mismatch probe (MM), which is identical to the PM probe except in the center nucleotide.^7^ Other methods of normalization like MAS5 do use MM probes to account for background noise by comparing their intensity to the intensity of their paired PM probe. RMA models the signals from the PM probes as the "total signal", which it labels as the sum of signal from the background and true signals. It is then able to split the signals into "true" and "background" by assuming that the real signal follows an exponential distribution whereas the background signal (like non-specific binding and optical noise) follows a normal distribution. By assuming these distributions, RMA can remove the background signal from the total signal.^7^
+
+Next, RMA performs the normalization to adjust for systematic variations between arrays by using quantile normalization. Quantile normalization ensures that the distribution of intensities across arrays is made uniform. The basic process of quantile normalization is to take the top differentially expressed gene across samples, find their mean, and then adjust their value to that calculated mean. This process is repeated for the second highest differentially expressed gene across each sample, then the third, and so on. Quantile normalization helps to remove systematic biases introduced by technical variations between arrays, such as batch effects or differences in labeling and hybridization efficiency. At the same time, it maintains the overall rank of gene intensity between samples. By aligning the intensity distributions across arrays in this manner, it ensures that any observed differences in gene expression are more likely to be biologically meaningful rather than artifacts of technical variation.^5^ The reason it is called "quantile normalization" is because each of the samples now have the same quantiles, which can be seen in the boxplots below.
+
+Finally, RMA performs summarization, which is a computation of the expression values for each probe set. A probe set is a collection of probes that target a gene, which for my array there are over 220,000 probes for a total of just over 22,000 genes (i.e. roughly 10 probes per gene). To account for outliers, a median polish algorithm is used across each probe for each probset. Median Polish works by arranging the probe intensities and their corresponding sample into a 2D matrix. The algorithm then calculates the median of each probe across all microarrays, and these medians are subtracted from each row, leaving residuals. Subsequently, the median of each microarray (column) is calculated and subtracted from each column. These steps are repeated until the calculated medians converge to zero. Through this iterative process, the data is adjusted such that the median of both rows and columns becomes zero, effectively removing probe and array effects and isolating the residuals for analysis.^10^
+
+SST-RMA (Summarized Statistical Test for RMA) is an extension of RMA that has an additional polish that adjusts for fold change compression and is more robust against variance in signals from CEL file. It incorporates two additional key components: GC4 (GC Correction Version 4) for background reduction and SST (Signal Space Transformation) for intensity normalization within the data processing pipeline. GC4 achieves background reduction by correcting for biases introduced by differences in the GC content of the hybridized cDNA sequences, which can affect the intensity of probe hybridization. Given how GC-rich sequences can bind their probes more strongly than AT-rich sequences, it can lead to variations in the measured signal intensities that are not related to actual gene expression levels.^11^ The SST portion adjusts the probe expression intensities to eliminate compression of fold change values.^12^ Fold change compression is a phenomenon where the true fold change in gene expression is underestimated, which has been widely reported in previous literature using microarrays.^12^ The overall causes for fold change compression is that the signal intensities are not necessarily proportional to the concentration of RNA. For instance, background intensities due to non-specific binding, individual probe effects such as the stability advantage of GC-rich probes over AT-rich ones, and excessive sample loading resulting in probe saturation and thus non-linear relationships between sample concentration and intensity—all these factors can contribute to diminished fold change in a comparison. The SST method modifies Affymetrix expression array probe intensities to minimize significant fold change compression while maintaining other array performance metrics.
+
+Originally, my plan was to also compare GCRMA normalization (from R). Unfortunately, throughout this project I've learned that many of the packages in the bioconductor guide I've been using^1^ are old and require updated methods to achieve my desired outcomes. While I've been successful in incorporating newer functions and code into most other parts of this project, GCRMA normalization is not something I could do. The ```oligo``` package I've used takes .CEL files from my experiment and creates an ExpressionFeatureSet object, whereas the ```affy``` package (which has similar functions as the oligo packages) creates an AffyBatch object. The gcrma function, however, only works on AffyBatch objects. Thus, I tried putting my .CEL files into an AffyBatch object for to perform the gcrma analysis, and repeatedly got errors. I eventually discovered that while AffyBatch objects can be created from these modern Affymetrix .CEL files, there is no Chip Definition File (CDF), which is required for gcrma analysis.^2^ Further, another resource mentions that GCRMA uses the IndexProbes() method in its steps, a key method for GCRMA normalization which does not work on ExpressionFeatureSets, thus there is no optimized way to do GCRMA normalization in my current context. I spent a whole day trying to find an alternate way to do a GCRMA normalization and could not find one, which may also be because it is far less popular than RMA.
+
+## Normalization of Data using RMA
+
+This code is straight foward, it applies the RMA normalization to my ExpressionFeatureSet object. TAC does this step in the background
+```{r}
+data.rma = rma(data)
+data.matrix = exprs(data.rma)
+```
+
+### Boxplot of normalized intensity data using RMA 
+
+Here I am generating the previous boxplot without normalized intensities along with the normalized values to compare them side-by-side. 
+```{r}
+
+normlogs = vector()
+
+for (i in 1:36) {
+normlogs = c(normlogs,data.matrix[,i])
+} 
+
+normData = data.frame(norm_logInt=normlogs, sampleName=file_names)
+
+dataBox2 = ggplot(logData,aes(sampleName,logInt))
+dataBox2 + geom_boxplot() + ylim(2,16) + ggtitle("before normalization") + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+
+dataBox1 = ggplot(normData, aes(sampleName,norm_logInt))
+dataBox1 + geom_boxplot() + ylim(0,16) + ggtitle("after normalization") + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+```
+
+All of the samples have had their intensities adjusted for background, normalized, and summarized. They can now be compared. The distribution of signal intensity for each array also has identical quantiles, as is expected from RMA normalization. 
+
+### MA plot of normalized intensity data using RMA  
+
+This code genearates MA plots using the normalized dataset:
+
+```{r, eval=FALSE}
+output_dir = "/Users/Enzo/Desktop/BIO\ 722/QC\ files/MA_plots_RMA/"
+
+for (i in 1:36) {
+name = paste(output_dir, "MAplot_",file_names[i],"_RMA.jpg",sep="")
+jpeg(name)
+MAplot(data.rma,which=i)
+dev.off()
+}
+```
+
+An underlying assumption in large datasets comparing differential gene expression is that the majority of genes are not differentially regulated, thus in a perfect world, the y values for all points in an MA plot should cluster around 0, and the red line indicating the median y values that spans left to right on the MA should superimpose y=0.^16^ Such a plot would indicate that the intensity ratios (i.e. M) are evenly distributed across the intensity values (A). However, systematic errors and imbalance in colour intensities often prevents these ideal patterns from forming, resulting in a curved data distribution. This curve is another indication that normalization is required for the dataset.^16^
+
+Below I am showing 1MM_6 an example how normalization can "straighten" this curve, resulting in a more even distribution of the data.
+```{r}
+MAplot(data,which=6)
+MAplot(data.rma,which=6)
+```
+
+### Principle Component Analysis
+
+Principle Componenet Analysis (PCA) plots provide a visual representation of how similar a particular sample is to another. The ultimate goal is typically to asses whether replicate samples of a condition are similar, represented by their clustering together. PCA reduces the dimensionality of the data by identifying major patterns of variation across genes, and depicts these major patterns in a lower-dimensional space (such as a 2D plot). In a PCA plot, each sample is represented as a point based on its gene expression profile, with similar samples clustering together. This visualization helps to identify groupings of samples corresponding to different experimental conditions or biological states. 
+
+```{r}
+
+color=c("red", "green", "blue", "orange", "purple", "cyan","magenta", "yellow", "brown", "pink", "gray", "black", "red", "green", "blue", "orange", "purple", "cyan","magenta", "yellow", "brown", "pink", "gray", "black", "red", "green", "blue", "orange", "purple", "cyan","magenta", "yellow", "brown", "pink", "gray", "black")
+
+pca = prcomp(t(data.matrix),scale=TRUE)
+rownames(pca$x) = c("Live_Mito_12", 
+  "Live_Mito_6", 
+  "Live_12", 
+  "Live_6", 
+  "Mock_Mito_12", 
+  "Mock_Mito_6", 
+  "Mock_12", 
+  "Mock_6", 
+  "UV_Mito_12",
+  "UV_Mito_6",
+  "UV_12",
+  "UV_6",
+  "Live_Mito_12", 
+  "Live_Mito_6", 
+  "Live_12", 
+  "Live_6", 
+  "Mock_Mito_12", 
+  "Mock_Mito_6", 
+  "Mock_12", 
+  "Mock_6", 
+  "UV_Mito_12",
+  "UV_Mito_6",
+  "UV_12",
+  "UV_6",
+  "Live_Mito_12", 
+  "Live_Mito_6", 
+  "Live_12", 
+  "Live_6", 
+  "Mock_Mito_12", 
+  "Mock_Mito_6", 
+  "Mock_12", 
+  "Mock_6", 
+  "UV_Mito_12",
+  "UV_Mito_6",
+  "UV_12",
+  "UV_6")
+
+#This line makes it possible for the legend to exist outside of the plot
+par(mar=c(6, 5, 5, 9), xpd=TRUE)
+#Creating the plot and adding the relevant colours
+plot(pca$x[, 1:2],col=color, pch = 19);
+legend("topright", inset=c(-0.3,0), legend = rownames(pca$x)[1:12], fill = unique(color), title = "Condition", cex = 0.8, bty = "n")
+  
+```
+The PCA analysis shows minimal grouping among most groups of biological replicates. This result, however, is not surprising, as there can be quite a bit of variation between biological replicates of cell culture experiments. For example, although the same cell line was used for each replicate, the cell passages were 2-3 passages apart for each experiment, and cell passage is known to influence the protein expression, growth rates, and, most importantly, response to stimuli.^13^ Further, our lab has found that BHV stocks in general are sensitive to freeze-thaw cycles, where more freeze-thawing can lower titers (not published). Thus, it is possible the later replicates received less virus than earlier ones. The same applies to stocks of Mitomycin C, where degradation of the drug can happen from freeze-thawing.^14^ Thus, it is also possible later replicates received less drug than what was calculated. Although much care was put into keeping conditions consistent between replicates, these factors among others can still influence outcomes of the same repeated experiment. Overall, however, one pattern the seems to emerge in this PCA plot is that samples harvested at 6 hours appear to cluster more towards the right of the plot whereas samples harvested at 12 hours are more towards the left of the plot.
+
+# Differentially Expressed Genes
+
+To determine which genes are differentially expressed between groups, I will use the ```limma``` pakcage. ```Limma``` takes the output of of the ```rma()``` method, which in my case is the variable data.rma. For my analysis with TAC, I compared two groups of samples at a time. 
+
+
+```{r}
+#Assigning group names to each of my files
+
+ph@data[, 2] = c("Live_Mito_12", 
+  "Live_Mito_6", 
+  "Live_12", 
+  "Live_6", 
+  "Mock_Mito_12", 
+  "Mock_Mito_6", 
+  "Mock_12", 
+  "Mock_6", 
+  "UV_Mito_12",
+  "UV_Mito_6",
+  "UV_12",
+  "UV_6",
+  "Live_Mito_12", 
+  "Live_Mito_6", 
+  "Live_12", 
+  "Live_6", 
+  "Mock_Mito_12", 
+  "Mock_Mito_6", 
+  "Mock_12", 
+  "Mock_6", 
+  "UV_Mito_12",
+  "UV_Mito_6",
+  "UV_12",
+  "UV_6",
+  "Live_Mito_12", 
+  "Live_Mito_6", 
+  "Live_12", 
+  "Live_6", 
+  "Mock_Mito_12", 
+  "Mock_Mito_6", 
+  "Mock_12", 
+  "Mock_6", 
+  "UV_Mito_12",
+  "UV_Mito_6",
+  "UV_12",
+  "UV_6")
+
+colnames(ph@data)[2]="source"
+
+groups = ph@data$source
+
+#Transforming names of groups into factors
+f = factor(groups,levels=c("Live_Mito_12", 
+  "Live_Mito_6", 
+  "Live_12", 
+  "Live_6", 
+  "Mock_Mito_12", 
+  "Mock_Mito_6", 
+  "Mock_12", 
+  "Mock_6", 
+  "UV_Mito_12",
+  "UV_Mito_6",
+  "UV_12",
+  "UV_6"))
+
+
+#Creating a design matrix
+design = model.matrix(~ 0 + f)
+colnames(design) = c("Live_Mito_12", 
+  "Live_Mito_6", 
+  "Live_12", 
+  "Live_6", 
+  "Mock_Mito_12", 
+  "Mock_Mito_6", 
+  "Mock_12", 
+  "Mock_6", 
+  "UV_Mito_12",
+  "UV_Mito_6",
+  "UV_12",
+  "UV_6")
+
+#Calculating mean expression levels by fitting a linear model to the data 
+data.fit = lmFit(data.matrix,design)
+
+```
+
+Now that all of the data processing is finished, I can begin comparing my groups of interest. My former analysis with TAC revealed that the 12 hour time point had more differentially expressed genes between Live BHV-treated cells and UV BHV-treated cells compared to the 6 hour time point. Thus, to compare the effects of RMA vs SST-RMA normalization, I will compare the samples (1-3)LO_12 with (1-3)MO_12, and compare (1-3)UO_12 with (1-3)MO_12. 
+
+```{r}
+#Specifying which groups to compare. Here I am comparing cells infected with Live BHV or UV BHV to control cells (mock-infected) that were harvested at 12 hours post-infection
+
+contrast.matrix_live = makeContrasts(Live_12-Mock_12,levels=design)
+data.fit.con_live = contrasts.fit(data.fit,contrast.matrix_live)
+
+contrast.matrix_UV = makeContrasts(UV_12-Mock_12,levels=design)
+data.fit.con_UV = contrasts.fit(data.fit,contrast.matrix_UV)
+
+
+
+```
+
+## Applying an Empirical Bayes Method
+
+The empirical Bayes method shrinks the variance of each gene between replicates. This method is particularly useful for large datasets with many thousands of genes but few biological replicates, such as mine where each groups only has 3 biological replicates. Empirical Bayes works by looking at the distribution of variation for every gene between all of my samples, and adjusting those with extreme variations towards a common value for all genes. The ultimate goal of Empirical Bayes is to minimize the influence of very high or low standard deviations on the t-test.^21^ TAC also performs this in the background.
+
+```{r}
+data.fit.eb_live = eBayes(data.fit.con_live)
+data.fit.eb_UV = eBayes(data.fit.con_UV)
+
+```
+
+## Creating a list of differentially expressed genes
+
+
+Traditionally, a log fold change of 2 has been chosen as the cutoff for which genes are considered to be differentially expressed. This decision is largely arbitrary and arises from the the misconception that low fold changes lack biological significance.^12^ While selecting differentially expressed genes based on statistics would be more appropriate, here I will use a combination of adjusted p values and fold change to align better with the analysis I've already performed with TAC.
+
+In my original analysis with TAC, I used a fold change of >3 and an adjusted p value of <0.05 cutoff to identify differentially expressed genes. However, when I analyzed the UV BHV vs mock group below, there were no genes with a fold change above 3. Thus, here I will use the cutoff of >1 and an adjusted p value of <0.05. Further, my project was particularly focused on looking at the differentially expressed genes that were common between Live and UV BHV. Given how UV BHV is a much "simpler" virus particle in that it cannot express viral proteins, and thus triggers less signaling pathways within a tumour, I hypothesized that this subset of genes common to Live and UV could offer insights into the minimum transcriptomic requirements in BHV's mechanism. 
+
+In the code below I am pulling out the differentially expressed genes and a creating a new dataframe containing the genes in the subset I described:
+
+```{r}
+#Live BHV
+options(digits=2)
+tab_live = topTable(data.fit.eb_live,coef=1,number=200000,adjust.method="BH",sort.by="logFC")
+topgenes_live = tab_live[tab_live$logFC > 1 & tab_live$adj.P.Val < 0.05, ]
+
+#UV BHV
+options(digits=2)
+tab_UV = topTable(data.fit.eb_UV,coef=1,number=200000,adjust.method="BH",sort.by="logFC")
+
+topgenes_UV = tab_UV[tab_UV$logFC > 1 & tab_UV$adj.P.Val < 0.05, ]
+```
+
+## Finding genes in common and creating a new data matrix
+
+```{r}
+#Extract all the gene names and then create a list of the common ones
+genes_live <- rownames(topgenes_live)
+genes_UV <- rownames(topgenes_UV)
+common_genes <- intersect(genes_live, genes_UV)
+
+
+# Filter topgenes_live and topgenes_UV to include only common genes
+common_genes_topgenes_live <- topgenes_live[rownames(topgenes_live)%in% common_genes, ]
+common_genes_topgenes_UV <- topgenes_UV[rownames(topgenes_UV) %in% common_genes, ]
+
+
+# Removing all columns except log fold change to simplify the data frame. The "drop = FALSE" ensures it stays as a dataframe. I am also using the "order" function to make the row names the same order, which will faciliate joining the dataframes together later
+
+common_genes_topgenes_live_simplified <- common_genes_topgenes_live[order(rownames(common_genes_topgenes_live)), "logFC", drop = FALSE]
+common_genes_topgenes_UV_simplified <- common_genes_topgenes_UV[order(rownames(common_genes_topgenes_UV)), "logFC", drop = FALSE]
+
+row_names <- rownames(common_genes_topgenes_live_simplified)
+live_logFC <- common_genes_topgenes_live_simplified[row_names, "logFC"]
+UV_logFC <- common_genes_topgenes_UV_simplified[row_names, "logFC"]
+
+# Combine the logFC columns from both data frames into a new data frame
+combined_logFC <- data.frame(
+  R_Live_logFC = live_logFC,
+  R_UV_logFC = UV_logFC
+)
+
+rownames(combined_logFC) = row_names
+
+#I used the microarray annotation file for this microarray to find the names of the genes. Now I will convert the transcript cluster IDs to the names of the genes. The gene beginning with "MG" is a control with no gene name, so I will remove that one. 
+combined_logFC_R = combined_logFC[-1, ]
+combined_logFC_R
+
+gene_names = c("Isg15", "Cxcl10", "Ifit3", "Ifit3b", "Ifit1")
+rownames(combined_logFC_R) = gene_names
+combined_logFC_R
+
+```
+## Combining fold change values with that from TAC
+
+Since the list of genes was so small, I simply copied the fold change values from TAC into a vector and appended it to the existing dataframe. This was also facilitated by the fact that all of these genes seen here also appeared in the analysis done with TAC. The list of genes were identical.
+
+```{r}
+TAC_Live_logFC <- c(35.55, 6.21, 31.5, 37.82, 20.82)
+TAC_UV_logFC <- c(9.18, 7.43, 7.73, 9, 6.07)
+
+combined_logFC_total <- cbind(combined_logFC_R, TAC_Live_logFC, TAC_UV_logFC)
+combined_logFC_total
+```
+
+The fold in gene expression is observably drastically different between RMA (done with R) and SST-RMA (done with TAC) normalization. As described in more detail earlier, this result is likely due to the SST algorithm decompressing the fold change of genes. Collectively, all of these genes are know as interferon-stimulated genes (ISGs).Isg15 is an extracellular immunomodulatory cytokine that regulates cellular function by conjugating proteins and is highly expressed in most tumours. Evidence suggests that Isg15 conjugates are protumour but free Isg15 is antitumour.^17^ Cxcl10 is a chemokine that stimulates monocytes, Natural Killer, and T cells that can attack cancer, and is also associated with tumour development and metastasis.^18^ Ifit1, Ifit3, and Ifit3b have similar functions where they form complexes to inhibit viral replication by binding viral RNA.^19^ They have a controversial role in cancer depending on cell type.^20^ All of these genes are genes that viruses tend to upregulate within cells they infect, and genes that our lab has previously see to be upregulated in cells infected with non-replicating enveloped viruses.^22^ Further, given how these genes are implicated in stimulating the immune response, it further suggests that the mechanism of an oncolytic virus is reliant on support from the immune system. Going forward, our lab hopes to use knowledge gained from analyzing these signaling pathways to better understand how BHV works within our therapy and what the minimal requirements are for it to be effective against tumours.
+
+Overall, in this project I have discussed some of the major quality checkpoints for microarray data, and why they are important to consider when analyzing these datasets. I also discussed the steps in normalizing data and how they differ between the software out lab his used historically to a more standardized normalization method. Lastly, I'd like to thank you all again for this semester. Coming from a lab where no one codes and statistics is seldom discussed, this project has been an immense and fruitful learning curve for me. With it being my first time using R and R markdown outside of BIO 720, I've truly grown to learn how involved and intricate the process is for analyzing microarrays and large datasets. I hope I was able to demonstrate how much I've learned in this project about statistics, quality control, and using R and markdown. I feel I got exactly out of the course what I wanted to. I hope you all enjoy your summers.
